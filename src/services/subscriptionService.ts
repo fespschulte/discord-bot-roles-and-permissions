@@ -1,12 +1,9 @@
-import { subscriptionStatusEnum } from "./../db/schema/subscriptions";
+import { and, eq } from "drizzle-orm";
 import { db } from "../db/connection";
 import schema from "../db/schema";
-import { and, eq } from "drizzle-orm";
+import type { SubscriptionStatus } from "../utils/subscriptionStatus";
 
-export async function findActiveSubscriptionByEmail(
-  email: string,
-  guildId: string
-) {
+export function findActiveSubscriptionByEmail(email: string, guildId: string) {
   return db.query.subscriptions.findFirst({
     where: and(
       eq(schema.subscriptions.email, email),
@@ -16,7 +13,7 @@ export async function findActiveSubscriptionByEmail(
   });
 }
 
-export async function linkDiscordToEmail(
+export function linkDiscordToEmail(
   discordId: string,
   email: string,
   guildId: string
@@ -35,7 +32,7 @@ export async function linkDiscordToEmail(
     });
 }
 
-export async function findUserByEmailAndGuild(email: string, guildId: string) {
+export function findUserByEmailAndGuild(email: string, guildId: string) {
   return db.query.users.findFirst({
     where: and(
       eq(schema.users.email, email),
@@ -44,7 +41,19 @@ export async function findUserByEmailAndGuild(email: string, guildId: string) {
   });
 }
 
-export async function updateOrInsertSubscription({
+export type UpsertSubscriptionInput = {
+  email: string;
+  guildId: string;
+  subscriptionId: string;
+  status: SubscriptionStatus;
+  cancellationDate?: Date;
+  dateNextCharge?: Date;
+  planName?: string;
+  productName?: string;
+  subscriberCode?: string;
+};
+
+export function updateOrInsertSubscription({
   email,
   guildId,
   subscriptionId,
@@ -54,25 +63,7 @@ export async function updateOrInsertSubscription({
   planName,
   productName,
   subscriberCode,
-}: {
-  email: string;
-  guildId: string;
-  subscriptionId: string;
-  status:
-    | "ACTIVE"
-    | "INACTIVE"
-    | "DELAYED"
-    | "CANCELLED_BY_CUSTOMER"
-    | "CANCELLED_BY_SELLER"
-    | "CANCELLED_BY_ADMIN"
-    | "STARTED"
-    | "OVERDUE";
-  cancellationDate?: Date;
-  dateNextCharge?: Date;
-  planName?: string;
-  productName?: string;
-  subscriberCode?: string;
-}) {
+}: UpsertSubscriptionInput) {
   return db
     .insert(schema.subscriptions)
     .values({

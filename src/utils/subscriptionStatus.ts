@@ -1,18 +1,18 @@
-export const allowedSubscriptionStatuses = [
-  "ACTIVE",
-  "INACTIVE",
-  "DELAYED",
-  "CANCELLED_BY_CUSTOMER",
-  "CANCELLED_BY_SELLER",
-  "CANCELLED_BY_ADMIN",
-  "STARTED",
-  "OVERDUE",
-] as const;
+import { subscriptionStatusEnum } from "../db/schema/subscriptions";
+
+export const allowedSubscriptionStatuses = subscriptionStatusEnum.enumValues;
 
 export type SubscriptionStatus = (typeof allowedSubscriptionStatuses)[number];
 
-export function parseSubscriptionStatus(status: any): SubscriptionStatus {
-  if (allowedSubscriptionStatuses.includes(status)) {
+function isSubscriptionStatus(status: unknown): status is SubscriptionStatus {
+  return (
+    typeof status === "string" &&
+    (allowedSubscriptionStatuses as readonly string[]).includes(status)
+  );
+}
+
+export function parseSubscriptionStatus(status: unknown): SubscriptionStatus {
+  if (isSubscriptionStatus(status)) {
     return status;
   }
   console.warn("[Hotmart] Received unknown subscription status:", status);
