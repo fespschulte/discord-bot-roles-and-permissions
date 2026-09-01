@@ -12,33 +12,40 @@ manual moderation.
 The service has two independent entry points that meet at the database.
 
 ```
-Hotmart (billing events)              Discord member
-        │                                   │
-        │ POST /webhook/hotmart             │ /link email:<hotmart email>
-        ▼                                   ▼
-  Fastify route                      discord.js gateway
-  Zod validation                     InteractionCreate
-        │                                   │
-        └────────► subscriptionService ◄─────┘
-                          │
-                          ▼
-                  PostgreSQL (Drizzle)
-                          │
-                          ▼
-                  VIP role add / remove
-                          │
-                          ▼
-                   Discord REST API
+Hotmart POST /webhook/hotmart          Discord /link
+        │                                    │
+        ▼                                    ▼
+ X-HOTMART-HOTTOK (timingSafeEqual)    deferReply (ephemeral)
+        │                                    │
+        ▼                                    ▼
+ Gateway ready? else 503               active subscription?
+        │                                    │
+        ▼                                    ▼
+ normalizeHotmartEvent                 email already claimed?
+        │                                    │
+        ▼                                    ▼
+ resolveEntitlement                    unique (email, guild_id)
+        │                                    │
+        └──────────► PostgreSQL ◄────────────┘
+                         │
+                         ▼
+              addVipRole / removeVipRole
+                         │
+                         ▼
+              reconcileRoles() on ready + interval
 ```
 
 Hotmart is the source of truth for entitlement. The database is a projection of it,
 and the Discord role is derived from that projection rather than from any single
 event. That means a member's correct role is always recoverable from stored state.
 
-**Linking flow.** A member runs `/link` with the email used on Hotmart. If an active
-subscription exists for that email, the Discord ID is stored against it and the VIP
-role is granted. Replies are ephemeral, so a purchase email is never exposed in a
-public channel.
+**Linking flow.** A member runs `/link` with the email used on Hotmart. The bot
+defers the Discord reply first, because the lookups can exceed the 3-second
+interaction window. If an active subscription exists, and that email is not already
+linked to a different Discord account, the Discord ID is stored and the VIP role is
+granted. Replies are ephemeral, so a purchase email is never exposed in a public
+channel. The same Discord account can re-link to a different email; a second account
+cannot claim an email that is already taken.
 
 **Webhook flow.** Hotmart posts subscription and purchase events. The request is
 authenticated, validated, normalized into a single flat shape, upserted, and then — if
@@ -48,11 +55,23 @@ the email is already linked to a Discord account — translated into a role chan
 `src/domain/entitlement.ts`, from the event name first and only then from
 `subscription.status`. This matters because Hotmart's two status vocabularies overlap:
 a `PURCHASE_APPROVED` payload can carry `purchase.status: "STARTED"`, and reading that
-status instead of the event would revoke a member who has just paid. An event carrying
-no status at all leaves the current role untouched rather than revoking it.
+status instead of the event would revoke a member who has just paid.
 
-Access is granted while the subscription is `ACTIVE`, and revoked for every other
-state, including late payment (`DELAYED`, `OVERDUE`) and unpaid billets.
+| Event | Result |
+| --- | --- |
+| `PURCHASE_APPROVED`, `PURCHASE_COMPLETE` | Grant |
+| `PURCHASE_CANCELED`, `PURCHASE_REFUNDED`, `PURCHASE_CHARGEBACK`, `PURCHASE_EXPIRED`, `PURCHASE_PROTEST` | Revoke |
+| `PURCHASE_BILLET_PRINTED`, `PURCHASE_DELAYED` | Revoke |
+| `SUBSCRIPTION_CANCELLATION` | Revoke |
+| `SWITCH_PLAN`, `UPDATE_SUBSCRIPTION_CHARGE_DATE`, other subscription events | Grant if `subscription.status` is `ACTIVE`, otherwise revoke |
+| Unknown event with no status field | No change |
+
+Access is granted while the stored subscription is `ACTIVE`, and revoked for every
+other state, including late payment (`DELAYED`, `OVERDUE`) and unpaid billets.
+Purchase events often omit `subscription.status`; in that case the row is stored as
+`ACTIVE` or `INACTIVE` from the intent above, so reconciliation can trust the
+database. An event carrying no status at all leaves the current role untouched
+rather than revoking it.
 
 **Reconciliation.** Discord calls can fail, so the role a member holds is re-derived
 from the database on startup and then on an interval. This is what makes "the database
@@ -98,9 +117,12 @@ defined by `VIP_ROLE_NAME` in `src/bot/roles.ts`.
 
 ### Hotmart setup
 
-Point a Hotmart webhook at `https://<your-host>/webhook/hotmart`. The handler
-understands subscription lifecycle events (cancellation, plan switch, charge date
-updates) and purchase events such as `PURCHASE_APPROVED`.
+Point a Hotmart webhook at `https://<your-host>/webhook/hotmart`. Subscribe at least to
+purchase approvals and the subscription lifecycle events in the table above
+(`PURCHASE_APPROVED`, `SUBSCRIPTION_CANCELLATION`, plan switches, charge-date updates).
+`PURCHASE_BILLET_PRINTED` and `PURCHASE_DELAYED` revoke access until the next approval
+— that is intentional for this product (paid access only while current), but it will
+strip VIP from an existing subscriber who prints a boleto for the next cycle.
 
 Copy the hottok Hotmart generates for the integration into `HOTMART_WEBHOOK_SECRET`.
 Hotmart sends it in the `X-HOTMART-HOTTOK` header of every delivery, and the service
@@ -120,7 +142,7 @@ Apply the schema and, optionally, seed a test subscription:
 
 ```bash
 npm run db:migrate
-npm run db:seed
+npm run db:seed   # inserts subscriber@example.com with an ACTIVE subscription
 ```
 
 On a database that predates the `(email, guild_id)` constraint, check for rows that
@@ -137,8 +159,11 @@ Start the service:
 npm start
 ```
 
-On startup the process validates the environment, registers the `/link` command with
-your guild, connects to the Discord gateway, and begins listening for webhooks.
+On startup the process validates the environment, binds HTTP on `0.0.0.0` (so the
+webhook is reachable from a container), registers `/link`, and then logs into
+Discord. Webhooks that arrive before `ClientReady` receive `503` and should be
+retried by Hotmart. Once the gateway is up, a reconciliation sweep runs immediately
+and then on `RECONCILE_INTERVAL_MINUTES`.
 
 ## Configuration
 
@@ -186,6 +211,10 @@ Discord gateway is still connecting. The `503` is deliberate: Hotmart retries on
 so a delivery that arrives during a restart is redelivered instead of being recorded
 with its role change silently dropped. `/health` is intentionally unauthenticated.
 
+If the database write succeeds but Discord role assignment fails, the handler still
+returns `200`. Failing the request would make Hotmart retry an event whose row is
+already stored. The next reconciliation pass repairs the role.
+
 ## Data model
 
 Two tables, both scoped by `guild_id` so a single deployment can serve more than one
@@ -222,13 +251,16 @@ src/
 ├── env.ts                          # Zod-validated environment
 ├── domain/
 │   ├── entitlement.ts              # Event → grant / revoke / no change
-│   └── hotmartEvent.ts             # Payload schemas and normalization
+│   ├── entitlement.test.ts
+│   ├── hotmartEvent.ts             # Payload schemas and normalization
+│   └── hotmartEvent.test.ts
 ├── bot/
 │   ├── bot.ts                      # Client, intents, /link command
 │   ├── roles.ts                    # VIP role add/remove
 │   └── state.ts                    # Gateway readiness flag
 ├── http/routes/
-│   └── webhook-hotmart.ts          # Hottok check + webhook handler
+│   ├── webhook-hotmart.ts          # Hottok check + webhook handler
+│   └── webhook-auth.test.ts
 ├── services/
 │   ├── subscriptionService.ts      # All database reads and writes
 │   └── reconciliation.ts           # Re-derives roles from stored subscriptions
@@ -240,7 +272,8 @@ src/
 │   ├── migrations/                 # Generated SQL migrations
 │   └── seed.ts                     # Local test data
 └── utils/
-    └── subscriptionStatus.ts       # Status allow-list and parser
+    ├── subscriptionStatus.ts       # Status allow-list and parser
+    └── subscriptionStatus.test.ts
 ```
 
 Both entry points go through `subscriptionService`, so the command handler and the
@@ -255,8 +288,9 @@ npm test
 ```
 
 Four focused suites, covering the parts where a mistake is expensive and invisible:
-the entitlement mapping, the status allow-list, payload normalization against Hotmart's
-documented examples, and webhook authentication through `app.inject()`. They need
+the entitlement mapping (including `PURCHASE_APPROVED` with `purchase.status: "STARTED"`),
+the status allow-list, payload normalization against Hotmart's documented examples, and
+webhook authentication plus the `503` readiness gate through `app.inject()`. They need
 neither a database nor a Discord connection.
 
 The bot and the HTTP server run in the same process. This lets the webhook handler
@@ -272,6 +306,10 @@ Known gaps, listed deliberately rather than left to be discovered:
   a race rather than open sharing, but a member who knows another customer's purchase
   email and gets there first still wins. A confirmation step — an emailed code, or a
   Hotmart-side lookup — would close it properly.
+- **`PURCHASE_BILLET_PRINTED` and `PURCHASE_DELAYED` revoke.** An existing subscriber
+  paying the next cycle by boleto loses VIP until `PURCHASE_APPROVED` arrives. That is
+  the strict paid-only mapping, not an accident. Omit those events in Hotmart if you
+  want the previous cycle to keep access until approval.
 - **Recovery is a sweep, not a queue.** A role change lost to a Discord outage is
   repaired on the next reconciliation pass, so the worst case is up to
   `RECONCILE_INTERVAL_MINUTES` of staleness. A durable job queue would make it
@@ -282,5 +320,7 @@ Known gaps, listed deliberately rather than left to be discovered:
 - **No CI.** The suite runs locally; nothing enforces it on push yet.
 - **Single guild in practice.** The schema is multi-tenant, but commands are registered
   for one `DISCORD_GUILD_ID` and the webhook attributes every event to it.
-- **The VIP role is matched by name.** Renaming it in Discord makes the bot create a
-  new one. Storing a role ID in configuration would be more robust.
+- **The VIP role is matched by name.** The bot fetches the guild's role list rather
+  than trusting a possibly empty cache, so a cache miss no longer creates a duplicate.
+  Renaming the role in Discord still makes the bot create a new one. Storing a role ID
+  in configuration would be more robust.
