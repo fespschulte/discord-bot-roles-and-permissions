@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import type { FastifyBaseLogger } from "fastify";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import { addVipRole, removeVipRole } from "../../bot/roles";
@@ -18,6 +19,21 @@ import {
   parseSubscriptionStatus,
   type SubscriptionStatus,
 } from "../../utils/subscriptionStatus";
+
+// Hotmart authenticates deliveries with a static per-account token in this header. There is
+// no body signature, so a constant-time comparison of the shared secret is the whole check.
+function hasValidHottok(received: string | string[] | undefined): boolean {
+  const token = Array.isArray(received) ? received[0] : received;
+  if (!token) {
+    return false;
+  }
+  const expected = Buffer.from(env.HOTMART_WEBHOOK_SECRET);
+  const actual = Buffer.from(token);
+  if (expected.length !== actual.length) {
+    return false;
+  }
+  return timingSafeEqual(expected, actual);
+}
 
 function statusFromIntent(
   intent: EntitlementIntent
@@ -58,6 +74,20 @@ export const webhookHotmartRoute: FastifyPluginCallbackZod = (app) => {
     {
       schema: {
         body: hotmartEventSchema,
+      },
+      // onRequest rather than preHandler: this runs before the body is parsed or validated,
+      // so an unauthenticated caller never reaches our schemas and always gets 401 instead
+      // of a shape-dependent 400.
+      onRequest: (request, reply, done) => {
+        if (!hasValidHottok(request.headers["x-hotmart-hottok"])) {
+          request.log.warn(
+            { ip: request.ip },
+            "[Webhook] Rejected delivery with missing or invalid hottok"
+          );
+          reply.status(401).send({ error: "Invalid hottok" });
+          return;
+        }
+        done();
       },
     },
     async (request, reply) => {
