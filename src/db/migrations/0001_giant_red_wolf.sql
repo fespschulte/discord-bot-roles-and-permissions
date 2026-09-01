@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD CONSTRAINT "users_discord_id_guild_id_unique" UNIQUE("discord_id","guild_id");

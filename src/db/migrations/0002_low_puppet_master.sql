@@ -1,0 +1,3 @@
+CREATE TYPE "public"."subscription_status" AS ENUM('ACTIVE', 'INACTIVE', 'DELAYED', 'CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_SELLER', 'CANCELLED_BY_ADMIN', 'STARTED', 'OVERDUE');--> statement-breakpoint
+ALTER TABLE "subscriptions" ALTER COLUMN "status" SET DATA TYPE "public"."subscription_status" USING "status"::"public"."subscription_status";--> statement-breakpoint
+ALTER TABLE "subscriptions" ALTER COLUMN "status" SET NOT NULL;
