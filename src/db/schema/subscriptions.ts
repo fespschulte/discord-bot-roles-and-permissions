@@ -1,10 +1,10 @@
 import {
+  boolean as pgBoolean,
+  pgEnum,
   pgTable,
   serial,
   text,
   timestamp,
-  boolean as pgBoolean,
-  pgEnum,
   unique,
 } from "drizzle-orm/pg-core";
 

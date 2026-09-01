@@ -1,27 +1,24 @@
 import { fastify } from "fastify";
-import { fastifyCors } from "@fastify/cors";
-import { fastifyMultipart } from "@fastify/multipart";
 import {
   serializerCompiler,
   validatorCompiler,
   type ZodTypeProvider,
 } from "fastify-type-provider-zod";
-import { env } from "./env";
-import { db } from "./db/connection";
 import { webhookHotmartRoute } from "./http/routes/webhook-hotmart";
 
-const app = fastify().withTypeProvider<ZodTypeProvider>();
+// A factory rather than a module-level instance: tests can build the app and use inject()
+// without binding a port.
+export function buildApp({ logger = true }: { logger?: boolean } = {}) {
+  const app = fastify({ logger }).withTypeProvider<ZodTypeProvider>();
 
-app.register(fastifyCors);
-app.register(fastifyMultipart);
+  app.setSerializerCompiler(serializerCompiler);
+  app.setValidatorCompiler(validatorCompiler);
 
-app.setSerializerCompiler(serializerCompiler);
-app.setValidatorCompiler(validatorCompiler);
+  app.get("/health", () => {
+    return { status: "ok" };
+  });
 
-app.get("/health", () => {
-  return { status: "ok" };
-});
+  app.register(webhookHotmartRoute);
 
-app.register(webhookHotmartRoute);
-
-app.listen({ port: env.PORT });
+  return app;
+}

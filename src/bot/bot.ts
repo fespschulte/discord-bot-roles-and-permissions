@@ -1,43 +1,29 @@
 import {
+  type ChatInputCommandInteraction,
   Client,
+  Events,
   GatewayIntentBits,
+  type Interaction,
   REST,
   Routes,
   SlashCommandBuilder,
-  Events,
-  ChatInputCommandInteraction,
-  Interaction,
-  SlashCommandStringOption,
-  GuildMember,
+  type SlashCommandStringOption,
 } from "discord.js";
-import { db } from "../db/connection";
-import schema from "../db/schema";
-import "dotenv/config";
-import { setDiscordClient } from "./roles";
-import { and, eq } from "drizzle-orm";
+import { env } from "../env";
 import { reconcileRoles } from "../services/reconciliation";
 import {
   findActiveSubscriptionByEmail,
   findUserByEmailAndGuild,
   linkDiscordToEmail,
 } from "../services/subscriptionService";
+import { addVipRole, setDiscordClient, VIP_ROLE_NAME } from "./roles";
 import { markBotReady } from "./state";
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.DirectMessages,
-    GatewayIntentBits.GuildMembers,
-  ],
-});
+const RECONCILE_INTERVAL_MS = env.RECONCILE_INTERVAL_MINUTES * 60 * 1000;
 
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN!;
-const CLIENT_ID = process.env.DISCORD_CLIENT_ID!;
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
-export const VIP_ROLE_NAME = "KNLHA MASTER";
-const RECONCILE_INTERVAL_MS =
-  Number(process.env.RECONCILE_INTERVAL_MINUTES || 15) * 60 * 1000;
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+});
 
 const commands = [
   new SlashCommandBuilder()
@@ -52,17 +38,67 @@ const commands = [
     .toJSON(),
 ];
 
-const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
-(async () => {
-  try {
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-      body: commands,
-    });
-    console.log("Comando /link registrado com sucesso!");
-  } catch (error) {
-    console.error("Erro ao registrar comando:", error);
+async function registerCommands() {
+  const rest = new REST({ version: "10" }).setToken(env.DISCORD_TOKEN);
+  await rest.put(
+    Routes.applicationGuildCommands(
+      env.DISCORD_CLIENT_ID,
+      env.DISCORD_GUILD_ID
+    ),
+    { body: commands }
+  );
+}
+
+async function handleLink(interaction: ChatInputCommandInteraction) {
+  const email = interaction.options.getString("email", true);
+  const guildId = env.DISCORD_GUILD_ID;
+
+  // Deferred first: the lookups and Discord calls below can exceed the 3 second window
+  // Discord allows for an initial interaction response.
+  await interaction.deferReply({ ephemeral: true });
+
+  const subscription = await findActiveSubscriptionByEmail(email, guildId);
+  if (!subscription) {
+    await interaction.editReply(
+      "Não encontramos assinatura ativa para o email informado."
+    );
+    return;
   }
-})();
+
+  const existingLink = await findUserByEmailAndGuild(email, guildId);
+  if (existingLink && existingLink.discordId !== interaction.user.id) {
+    await interaction.editReply(
+      "Este email já está vinculado a outra conta do Discord. Se você acredita que isso é um erro, entre em contato com a administração."
+    );
+    return;
+  }
+
+  await linkDiscordToEmail(interaction.user.id, email, guildId);
+  await addVipRole(interaction.user.id, guildId);
+
+  await interaction.editReply(
+    `Assinatura ativa encontrada! Você agora é um ${VIP_ROLE_NAME}.`
+  );
+}
+
+client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+  if (!interaction.isChatInputCommand() || interaction.commandName !== "link") {
+    return;
+  }
+
+  try {
+    await handleLink(interaction);
+  } catch (error) {
+    console.error("[Bot] /link failed:", error);
+    const message =
+      "Não foi possível concluir o vínculo agora. Tente novamente em alguns minutos.";
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply(message);
+    } else {
+      await interaction.reply({ content: message, ephemeral: true });
+    }
+  }
+});
 
 function runReconciliation() {
   reconcileRoles().catch((error) => {
@@ -73,57 +109,21 @@ function runReconciliation() {
 client.once(Events.ClientReady, () => {
   setDiscordClient(client);
   markBotReady();
-  console.log(`Bot conectado como ${client.user?.tag}`);
+  console.log(`[Bot] Connected as ${client.user?.tag}`);
+
+  // Catch up on anything missed while the gateway was down, then keep drift in check.
   runReconciliation();
   setInterval(runReconciliation, RECONCILE_INTERVAL_MS);
 });
 
-client.on(Events.InteractionCreate, async (interaction: Interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  if (interaction.commandName === "link") {
-    const email = interaction.options.getString("email");
-    if (!email) {
-      await interaction.reply({ content: "Email inválido.", ephemeral: true });
-      return;
-    }
-    const subscription = await findActiveSubscriptionByEmail(email, GUILD_ID);
-    if (subscription) {
-      const existingLink = await findUserByEmailAndGuild(email, GUILD_ID);
-      if (existingLink && existingLink.discordId !== interaction.user.id) {
-        await interaction.reply({
-          content:
-            "Este email já está vinculado a outra conta do Discord. Se você acredita que isso é um erro, entre em contato com a administração.",
-          ephemeral: true,
-        });
-        return;
-      }
-      await linkDiscordToEmail(interaction.user.id, email, GUILD_ID);
-      const guild = await client.guilds.fetch(GUILD_ID);
-      const member = await guild.members.fetch(interaction.user.id);
-      let vipRole = guild.roles.cache.find(
-        (role) => role.name === VIP_ROLE_NAME
-      );
-      if (!vipRole) {
-        vipRole = await guild.roles.create({
-          name: VIP_ROLE_NAME,
-          color: "Gold",
-        });
-      }
-      await member.roles.add(vipRole);
-      await interaction.reply({
-        content: `Assinatura ativa encontrada! Você agora é um ${VIP_ROLE_NAME}.`,
-        ephemeral: true,
-      });
-    } else {
-      await interaction.reply({
-        content: `Não encontramos assinatura ativa para o email informado.`,
-        ephemeral: true,
-      });
-    }
+export async function startBot() {
+  try {
+    await registerCommands();
+    console.log("[Bot] Slash command /link registered");
+  } catch (error) {
+    // A failed registration leaves the bot usable for existing commands, so keep going.
+    console.error("[Bot] Failed to register slash commands:", error);
   }
-});
 
-export function startBot() {
-  client.login(DISCORD_TOKEN);
+  await client.login(env.DISCORD_TOKEN);
 }

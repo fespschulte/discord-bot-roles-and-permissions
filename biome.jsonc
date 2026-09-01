@@ -1,11 +1,27 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.0.5/schema.json",
-  "extends": [
-    "ultracite"
-  ],
+  "extends": ["ultracite"],
+  "files": {
+    // drizzle-kit output: generated, and reformatting it would fight the next generate.
+    "includes": ["**", "!src/db/migrations/**"]
+  },
   "javascript": {
     "formatter": {
-      "semicolons": "asNeeded"
+      "semicolons": "always",
+      // Matches the existing codebase; the preset default would rewrite every string.
+      "quoteStyle": "double"
+    }
+  },
+  "linter": {
+    "rules": {
+      "style": {
+        // The codebase uses camelCase filenames consistently.
+        "useFilenamingConvention": "off"
+      },
+      "suspicious": {
+        // console is the intended output for a bot and its scripts.
+        "noConsole": "off"
+      }
     }
   }
 }
