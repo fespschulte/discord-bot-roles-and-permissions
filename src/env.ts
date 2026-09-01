@@ -7,6 +7,7 @@ const envSchema = z.object({
   DISCORD_CLIENT_ID: z.string(),
   DISCORD_GUILD_ID: z.string(),
   HOTMART_WEBHOOK_SECRET: z.string(),
+  RECONCILE_INTERVAL_MINUTES: z.coerce.number().int().positive().default(15),
 });
 
 export const env = envSchema.parse(process.env);

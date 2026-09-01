@@ -15,11 +15,13 @@ import schema from "../db/schema";
 import "dotenv/config";
 import { setDiscordClient } from "./roles";
 import { and, eq } from "drizzle-orm";
+import { reconcileRoles } from "../services/reconciliation";
 import {
   findActiveSubscriptionByEmail,
   findUserByEmailAndGuild,
   linkDiscordToEmail,
 } from "../services/subscriptionService";
+import { markBotReady } from "./state";
 
 const client = new Client({
   intents: [
@@ -34,6 +36,8 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN!;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID!;
 const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 export const VIP_ROLE_NAME = "KNLHA MASTER";
+const RECONCILE_INTERVAL_MS =
+  Number(process.env.RECONCILE_INTERVAL_MINUTES || 15) * 60 * 1000;
 
 const commands = [
   new SlashCommandBuilder()
@@ -60,9 +64,18 @@ const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
   }
 })();
 
+function runReconciliation() {
+  reconcileRoles().catch((error) => {
+    console.error("[Bot] Reconciliation run failed:", error);
+  });
+}
+
 client.once(Events.ClientReady, () => {
   setDiscordClient(client);
+  markBotReady();
   console.log(`Bot conectado como ${client.user?.tag}`);
+  runReconciliation();
+  setInterval(runReconciliation, RECONCILE_INTERVAL_MS);
 });
 
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {

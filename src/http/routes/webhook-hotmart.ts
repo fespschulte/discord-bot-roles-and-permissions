@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { FastifyBaseLogger } from "fastify";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import { addVipRole, removeVipRole } from "../../bot/roles";
+import { isBotReady } from "../../bot/state";
 import {
   type EntitlementIntent,
   resolveEntitlement,
@@ -35,6 +36,9 @@ function hasValidHottok(received: string | string[] | undefined): boolean {
   return timingSafeEqual(expected, actual);
 }
 
+// Purchase events often carry no `subscription.status`. Persisting the entitlement we just
+// derived keeps the stored row consistent with the role we apply, which is what lets
+// reconciliation trust the database.
 function statusFromIntent(
   intent: EntitlementIntent
 ): SubscriptionStatus | undefined {
@@ -61,6 +65,8 @@ async function syncVipRole(
     }
     log.info({ discordId, intent }, "[Webhook] VIP role synchronized");
   } catch (error) {
+    // Reconciliation is the recovery path. Failing the request would make Hotmart retry the
+    // whole event, including the database write.
     log.error(
       { err: error, discordId, intent },
       "[Webhook] Failed to synchronize VIP role"
@@ -91,6 +97,17 @@ export const webhookHotmartRoute: FastifyPluginCallbackZod = (app) => {
       },
     },
     async (request, reply) => {
+      // Hotmart retries on 5xx. Refusing the delivery until the gateway is up is what keeps
+      // a restart from silently swallowing role changes.
+      if (!isBotReady()) {
+        request.log.warn(
+          "[Webhook] Rejected delivery: Discord gateway not ready yet"
+        );
+        return reply
+          .status(503)
+          .send({ error: "Discord gateway not ready, please retry" });
+      }
+
       const normalized = normalizeHotmartEvent(request.body);
       const guildId = env.DISCORD_GUILD_ID;
 
