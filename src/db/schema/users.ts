@@ -15,5 +15,6 @@ export const users = pgTable(
   },
   (table) => ({
     discordGuildUnique: unique().on(table.discordId, table.guildId),
+    emailGuildUnique: unique().on(table.email, table.guildId),
   })
 );

@@ -2,8 +2,8 @@ import { env } from "../env";
 import { db } from "./connection";
 import schema from "./schema";
 
-const GUILD_ID = env.DISCORD_GUILD_ID || "default-guild";
-const TEST_EMAIL = "fschultepinto@gmail.com";
+const GUILD_ID = env.DISCORD_GUILD_ID;
+const TEST_EMAIL = "subscriber@example.com";
 
 async function seed() {
   // Cria uma assinatura ativa

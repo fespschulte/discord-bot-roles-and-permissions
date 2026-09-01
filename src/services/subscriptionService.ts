@@ -3,10 +3,16 @@ import { db } from "../db/connection";
 import schema from "../db/schema";
 import type { SubscriptionStatus } from "../utils/subscriptionStatus";
 
+// Every lookup and write goes through this. Without it, case variants of the same address
+// would bypass the unique constraint on (email, guild_id).
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
 export function findActiveSubscriptionByEmail(email: string, guildId: string) {
   return db.query.subscriptions.findFirst({
     where: and(
-      eq(schema.subscriptions.email, email),
+      eq(schema.subscriptions.email, normalizeEmail(email)),
       eq(schema.subscriptions.guildId, guildId),
       eq(schema.subscriptions.status, "ACTIVE")
     ),
@@ -18,24 +24,25 @@ export function linkDiscordToEmail(
   email: string,
   guildId: string
 ) {
+  const normalizedEmail = normalizeEmail(email);
   return db
     .insert(schema.users)
     .values({
       discordId,
-      email,
+      email: normalizedEmail,
       guildId,
       lastUpdate: new Date(),
     })
     .onConflictDoUpdate({
       target: [schema.users.discordId, schema.users.guildId],
-      set: { email, lastUpdate: new Date() },
+      set: { email: normalizedEmail, lastUpdate: new Date() },
     });
 }
 
 export function findUserByEmailAndGuild(email: string, guildId: string) {
   return db.query.users.findFirst({
     where: and(
-      eq(schema.users.email, email),
+      eq(schema.users.email, normalizeEmail(email)),
       eq(schema.users.guildId, guildId)
     ),
   });
@@ -67,7 +74,7 @@ export function updateOrInsertSubscription({
   return db
     .insert(schema.subscriptions)
     .values({
-      email,
+      email: normalizeEmail(email),
       guildId,
       subscriptionId,
       status,

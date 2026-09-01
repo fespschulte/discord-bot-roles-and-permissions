@@ -17,6 +17,7 @@ import { setDiscordClient } from "./roles";
 import { and, eq } from "drizzle-orm";
 import {
   findActiveSubscriptionByEmail,
+  findUserByEmailAndGuild,
   linkDiscordToEmail,
 } from "../services/subscriptionService";
 
@@ -73,12 +74,18 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       await interaction.reply({ content: "Email inválido.", ephemeral: true });
       return;
     }
-    // Consulta no banco se existe assinatura ativa para o email
     const subscription = await findActiveSubscriptionByEmail(email, GUILD_ID);
     if (subscription) {
-      // Vincula o discord_id ao email na tabela users
+      const existingLink = await findUserByEmailAndGuild(email, GUILD_ID);
+      if (existingLink && existingLink.discordId !== interaction.user.id) {
+        await interaction.reply({
+          content:
+            "Este email já está vinculado a outra conta do Discord. Se você acredita que isso é um erro, entre em contato com a administração.",
+          ephemeral: true,
+        });
+        return;
+      }
       await linkDiscordToEmail(interaction.user.id, email, GUILD_ID);
-      // Atribui a role VIP
       const guild = await client.guilds.fetch(GUILD_ID);
       const member = await guild.members.fetch(interaction.user.id);
       let vipRole = guild.roles.cache.find(
